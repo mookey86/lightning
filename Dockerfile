@@ -1,28 +1,29 @@
 # This Dockerfile is used by buildx to build ARM64, AMD64, and ARM32 Docker images from an AMD64 host.
 # To speed up the build process, we are cross-compiling rather than relying on QEMU.
 # There are four main stages:
-# * downloader: Downloads specific binaries needed for c-lightning for each architecture.
+# * downloader: Downloads specific binaries needed for core lightning for each architecture.
 # * builder: Cross-compiles for each architecture.
-# * builder-python: Builds Python dependencies for cln-rest with QEMU.
+# * builder-python: Builds Python dependencies for clnrest & wss-proxy with QEMU.
 # * final: Creates the runtime image.
 
+ARG DEFAULT_TARGETPLATFORM="linux/amd64"
 ARG BASE_DISTRO="debian:bullseye-slim"
 
-FROM --platform=$BUILDPLATFORM ${BASE_DISTRO} as base-downloader
+FROM --platform=$BUILDPLATFORM ${BASE_DISTRO} AS base-downloader
 RUN set -ex \
 	&& apt-get update \
 	&& apt-get install -qq --no-install-recommends ca-certificates dirmngr wget qemu-user-static binfmt-support
 
-FROM base-downloader as base-downloader-linux-amd64
+FROM base-downloader AS base-downloader-linux-amd64
 ENV TARBALL_ARCH_FINAL=x86_64-linux-gnu
 
-FROM base-downloader as base-downloader-linux-arm64
+FROM base-downloader AS base-downloader-linux-arm64
 ENV TARBALL_ARCH_FINAL=aarch64-linux-gnu
 
-FROM base-downloader as base-downloader-linux-arm
+FROM base-downloader AS base-downloader-linux-arm
 ENV TARBALL_ARCH_FINAL=arm-linux-gnueabihf
 
-FROM base-downloader-${TARGETOS}-${TARGETARCH} as downloader
+FROM base-downloader-${TARGETOS}-${TARGETARCH} AS downloader
 
 RUN set -ex \
 	&& apt-get update \
@@ -54,7 +55,7 @@ RUN mkdir /opt/litecoin && cd /opt/litecoin \
     && tar -xzvf litecoin.tar.gz litecoin-$LITECOIN_VERSION/bin/litecoin-cli --strip-components=1 --exclude=*-qt \
     && rm litecoin.tar.gz
 
-FROM --platform=linux/amd64 ${BASE_DISTRO} as base-builder
+FROM --platform=${DEFAULT_TARGETPLATFORM} ${BASE_DISTRO} AS base-builder
 RUN apt-get update -qq && \
     apt-get install -qq -y --no-install-recommends \
         autoconf \
@@ -86,6 +87,7 @@ RUN apt-get update -qq && \
         unzip \
         tclsh
 
+ENV PATH="/root/.local/bin:$PATH"
 ENV PYTHON_VERSION=3
 RUN curl -sSL https://install.python-poetry.org | python3 -
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.9 1
@@ -100,14 +102,14 @@ RUN git clone --recursive /tmp/lightning . && \
     git checkout $(git --work-tree=/tmp/lightning --git-dir=/tmp/lightning/.git rev-parse HEAD)
 
 # Do not build python plugins (clnrest & wss-proxy) here, python doesn't support cross compilation.
-RUN sed -i '/^clnrest\|^wss-proxy/d' pyproject.toml && \
-    /root/.local/bin/poetry export -o requirements.txt --without-hashes
+RUN sed -i '/^clnrest\|^wss-proxy/d' pyproject.toml && poetry export -o requirements.txt --without-hashes
 RUN pip3 install -r requirements.txt && pip3 cache purge
+
 WORKDIR /
 
-FROM base-builder as base-builder-linux-amd64
+FROM base-builder AS base-builder-linux-amd64
 
-FROM base-builder as base-builder-linux-arm64
+FROM base-builder AS base-builder-linux-arm64
 ENV target_host=aarch64-linux-gnu \
     target_host_rust=aarch64-unknown-linux-gnu \
     target_host_qemu=qemu-aarch64-static
@@ -133,7 +135,7 @@ ENV \
 ZLIB_CONFIG="--prefix=${QEMU_LD_PREFIX}" \
 SQLITE_CONFIG="--host=${target_host} --prefix=$QEMU_LD_PREFIX"
 
-FROM base-builder as base-builder-linux-arm
+FROM base-builder AS base-builder-linux-arm
 
 ENV target_host=arm-linux-gnueabihf \
     target_host_rust=armv7-unknown-linux-gnueabihf \
@@ -160,7 +162,7 @@ ENV \
 ZLIB_CONFIG="--prefix=${QEMU_LD_PREFIX}" \
 SQLITE_CONFIG="--host=${target_host} --prefix=$QEMU_LD_PREFIX"
 
-FROM base-builder-${TARGETOS}-${TARGETARCH} as builder
+FROM base-builder-${TARGETOS}-${TARGETARCH} AS builder
 
 ENV LIGHTNINGD_VERSION=master
 
@@ -179,7 +181,7 @@ RUN unzip sqlite.zip \
     && make install && cd .. && rm sqlite.zip && rm -rf sqlite-*
 
 ENV RUST_PROFILE=release
-ENV PATH=$PATH:/root/.cargo/bin/
+ENV PATH="/root/.cargo/bin:/root/.local/bin:$PATH"
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y ${RUSTUP_INSTALL_OPTS}
 RUN rustup toolchain install stable --component rustfmt --allow-downgrade
 
@@ -196,53 +198,17 @@ RUN ( ! [ "${target_host}" = "arm-linux-gnueabihf" ] ) || \
 
 # Ensure that the desired grpcio-tools & protobuf versions are installed
 # https://github.com/ElementsProject/lightning/pull/7376#issuecomment-2161102381
-RUN /root/.local/bin/poetry lock --no-update && \
-    /root/.local/bin/poetry install
+RUN poetry lock --no-update && poetry install
 
-RUN ./configure --prefix=/tmp/lightning_install --enable-static && \
-    make && \
-    /root/.local/bin/poetry run make install
-
-# We need to build python plugins on the target's arch because python doesn't support cross build
-FROM ${BASE_DISTRO} as builder-python
-RUN apt-get update -qq && \
-    apt-get install -qq -y --no-install-recommends \
-        git \
-        curl \
-        libtool \
-        pkg-config \
-        autoconf \
-        automake \
-        build-essential \
-        libffi-dev \
-        libssl-dev \
-        python3.9 \
-        python3-dev \
-        python3-pip && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN curl -sSL https://install.python-poetry.org | python3 -
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.9 1
-
-ENV PYTHON_VERSION=3
+RUN cd plugins/clnrest && poetry export -o requirements.txt --without-hashes && cd /opt/lightningd
+RUN cd plugins/wss-proxy && poetry export -o requirements.txt --without-hashes && cd /opt/lightningd
+COPY plugins/clnrest /tmp/clnrest
+COPY plugins/wss-proxy /tmp/wss-proxy
 WORKDIR /opt/lightningd
 
-COPY plugins/clnrest/pyproject.toml plugins/clnrest/pyproject.toml
-COPY plugins/wss-proxy/pyproject.toml plugins/wss-proxy/pyproject.toml
+RUN ./configure --prefix=/tmp/lightning_install --enable-static && make && poetry run make install
 
-RUN cd plugins/clnrest && \
-    /root/.local/bin/poetry export -o requirements.txt --without-hashes && \
-    pip3 install -r requirements.txt && \
-    cd /opt/lightningd
-
-RUN cd plugins/wss-proxy && \
-    /root/.local/bin/poetry export -o requirements.txt --without-hashes && \
-    pip3 install -r requirements.txt && \
-    cd /opt/lightningd && \
-    pip3 cache purge
-
-FROM ${BASE_DISTRO} as final
+FROM ${BASE_DISTRO} AS final
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -256,6 +222,18 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+COPY --from=builder /tmp/clnrest /tmp/clnrest
+COPY --from=builder /tmp/wss-proxy /tmp/wss-proxy
+RUN pip3 install -r /tmp/clnrest/requirements.txt && \
+    pip3 install -r /tmp/wss-proxy/requirements.txt && \
+    pip3 cache purge
+RUN rm -f /tmp/clnrest/requirements.txt /tmp/wss-proxy/requirements.txt
+
+COPY --from=builder /tmp/lightning_install/ /usr/local/
+COPY --from=downloader /opt/bitcoin/bin /usr/bin
+COPY --from=downloader /opt/litecoin/bin /usr/bin
+COPY tools/docker-entrypoint.sh entrypoint.sh
+
 ENV LIGHTNINGD_DATA=/root/.lightning
 ENV LIGHTNINGD_RPC_PORT=9835
 ENV LIGHTNINGD_PORT=9735
@@ -264,12 +242,6 @@ ENV LIGHTNINGD_NETWORK=bitcoin
 RUN mkdir $LIGHTNINGD_DATA && \
     touch $LIGHTNINGD_DATA/config
 VOLUME [ "/root/.lightning" ]
-
-COPY --from=builder /tmp/lightning_install/ /usr/local/
-COPY --from=builder-python /usr/local/lib/python3.9/dist-packages/ /usr/local/lib/python3.9/dist-packages/
-COPY --from=downloader /opt/bitcoin/bin /usr/bin
-COPY --from=downloader /opt/litecoin/bin /usr/bin
-COPY tools/docker-entrypoint.sh entrypoint.sh
 
 EXPOSE 9735 9835
 ENTRYPOINT  [ "/usr/bin/tini", "-g", "--", "./entrypoint.sh" ]
