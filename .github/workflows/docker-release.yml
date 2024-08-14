@@ -3,12 +3,22 @@ name: Build and push multi-platform docker images
 on:
   push:
     tags:
-      - '^v[0-9]{2}\.[0-9]{2}(\.[0-9]{1,2})?$'
+      - '^v[0-9]{2}\.[0-9]{2}(\.[0-9]{1,2})?([a-zA-Z0-9]*)?$'
   workflow_dispatch:
     inputs:
       version:
         description: 'Release version'
         required: true
+
+      repository-name:
+        description: 'Docker repository name'
+        default: 'ElementsProject'
+        required: false
+
+      push-latest:
+        description: 'Whether to push the latest tag'
+        default: 'true'
+        required: false
 
 jobs:
   build:
@@ -30,8 +40,8 @@ jobs:
         username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
 
-    - name: Set up version
-      id: set-version
+    - name: Set up values
+      id: set-values
       run: |
         if [ "${{ github.event.inputs.version }}" != "" ]; then
           VERSION=${{ github.event.inputs.version }}
@@ -42,13 +52,44 @@ jobs:
           exit 1
         fi
         echo "VERSION=$VERSION" >> $GITHUB_ENV
-        
+
+        if [ "${{ github.event.inputs.repository-name }}" != "" ]; then
+          REPONAME=${{ github.event.inputs.repository-name }}
+        else
+          REPONAME="ElementsProject"
+        fi
+        echo "REPONAME=$REPONAME" >> $GITHUB_ENV
+
+        if [ "${{ github.event.inputs.push-latest }}" != "" ]; then
+          PUSHLATEST=${{ github.event.inputs.push-latest }}
+        else
+          PUSHLATEST="true"
+        fi
+        echo "PUSHLATEST=$PUSHLATEST" >> $GITHUB_ENV
+
+    - name: Set Tags
+      id: set-tags
+      run: |
+        TAGS="${{ env.REPONAME }}/lightningd:${{ env.VERSION }}"
+        if [ "${{ env.PUSHLATEST }}" == "true" ]; then
+          TAGS="$TAGS,${{ env.REPONAME }}/lightningd:latest"
+        fi
+        echo "TAGS=$TAGS" >> $GITHUB_ENV
+
+    - name: Print GitHub Ref Values
+      run: |
+        echo "GITHUB_REF_TYPE: ${{ github.ref_type }}"
+        echo "GITHUB_REF_NAME: ${{ github.ref_name }}"
+        echo "VERSION ENV: ${{ env.VERSION }}"
+        echo "VERSION: $VERSION"
+        echo "REPONAME ${{ env.REPONAME }}"
+        echo "PUSHLATEST ${{ env.PUSHLATEST }}"
+        echo "TAGS ${{ env.TAGS }}"
+
     - name: Build and push Docker image
       uses: docker/build-push-action@v5
       with:
         context: .
         push: true
         platforms: linux/amd64,linux/arm64,linux/arm/v7
-        tags: |
-          elementsproject/lightningd:$VERSION
-          elementsproject/lightningd:latest
+        tags: ${{ env.TAGS }}
