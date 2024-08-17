@@ -3,7 +3,6 @@
  */
 #ifndef LIGHTNING_COMMON_JSON_STREAM_H
 #define LIGHTNING_COMMON_JSON_STREAM_H
-#include "ccan/compiler/compiler.h"
 #include "config.h"
 
 #include <bitcoin/short_channel_id.h>
