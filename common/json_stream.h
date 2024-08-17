@@ -5,10 +5,10 @@
 #define LIGHTNING_COMMON_JSON_STREAM_H
 #include "config.h"
 
-#include <bitcoin/short_channel_id.h>
 #define JSMN_STRICT 1
 # include <external/jsmn/jsmn.h>
 
+#include <bitcoin/short_channel_id.h>
 #include <ccan/short_types/short_types.h>
 #include <ccan/tal/tal.h>
 #include <ccan/time/time.h>
